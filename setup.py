@@ -12,7 +12,6 @@ setup(
         "transformers==4.40.0",
         "accelerate==1.4.0",
         "diffusers==0.33.1", 
-        
         "numpy==1.26.4",
         "pandas==2.2.3",
         "scipy==1.15.2",

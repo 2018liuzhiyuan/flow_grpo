@@ -306,3 +306,7 @@ tags
 wandb/
 logs/
 notebooks/
+models/
+*.mp4
+.vscode/
+reward-server/

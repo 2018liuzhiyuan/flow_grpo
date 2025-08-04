@@ -25,6 +25,8 @@ def get_config():
     config.use_lora = True
     config.dataset = ""
     config.resolution = 768
+    config.height = 480 
+    config.width = 832
 
     ###### Pretrained Model ######
     config.pretrained = pretrained = ml_collections.ConfigDict()

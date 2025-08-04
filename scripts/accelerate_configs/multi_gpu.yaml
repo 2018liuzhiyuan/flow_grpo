@@ -4,4 +4,4 @@ downcast_bf16: 'yes'
 mixed_precision: fp16
 machine_rank: 0
 num_machines: 1
-num_processes: 8
+num_processes: 4

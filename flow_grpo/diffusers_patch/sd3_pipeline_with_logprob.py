@@ -1,10 +1,10 @@
-# Copied from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
+# Copied from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/wan/pipeline_wan.py
 # with the following modifications:
 # - It uses the patched version of `sde_step_with_logprob` from `sd3_sde_with_logprob.py`.
 # - It returns all the intermediate latents of the denoising process as well as the log probs of each denoising step.
 from typing import Any, Dict, List, Optional, Union
 import torch
-from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import retrieve_timesteps
+from diffusers.pipelines.wan.pipeline_wan import retrieve_timesteps
 from .sd3_sde_with_logprob import sde_step_with_logprob
 
 @torch.no_grad()

@@ -11,21 +11,21 @@ from accelerate import Accelerator
 from ml_collections import config_flags
 from accelerate.utils import set_seed, ProjectConfiguration
 from accelerate.logging import get_logger
-from diffusers import StableDiffusion3Pipeline
+from diffusers import WanPipeline
 from diffusers.utils.torch_utils import is_compiled_module
 import numpy as np
-import flow_grpo.prompts
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 import flow_grpo.rewards
 from flow_grpo.stat_tracking import PerPromptStatTracker
-from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob import pipeline_with_logprob
+from flow_grpo.diffusers_patch.wan_pipeline_with_logprob import pipeline_with_logprob
 from flow_grpo.diffusers_patch.sd3_sde_with_logprob import sde_step_with_logprob
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt
 import torch
-import wandb
+import swanlab
 from functools import partial
 import tqdm
 import tempfile
-from PIL import Image
+from diffusers.utils import export_to_video
 from peft import LoraConfig, get_peft_model, set_peft_model_state_dict, PeftModel
 import random
 from torch.utils.data import Dataset, DataLoader, Sampler
@@ -127,8 +127,8 @@ def compute_text_embeddings(prompt, text_encoders, tokenizers, max_sequence_leng
             text_encoders, tokenizers, prompt, max_sequence_length
         )
         prompt_embeds = prompt_embeds.to(device)
-        pooled_prompt_embeds = pooled_prompt_embeds.to(device)
-    return prompt_embeds, pooled_prompt_embeds
+        # pooled_prompt_embeds = pooled_prompt_embeds.to(device)
+    return prompt_embeds
 
 def calculate_zero_std_ratio(prompts, gathered_rewards):
     """
@@ -178,13 +178,12 @@ def create_generator(prompts, base_seed):
     return generators
 
         
-def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config):
+def compute_log_prob(transformer, pipeline, sample, j, embeds, config):
     if config.train.cfg:
         noise_pred = transformer(
             hidden_states=torch.cat([sample["latents"][:, j]] * 2),
             timestep=torch.cat([sample["timesteps"][:, j]] * 2),
             encoder_hidden_states=embeds,
-            pooled_projections=pooled_embeds,
             return_dict=False,
         )[0]
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -199,7 +198,6 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
             hidden_states=sample["latents"][:, j],
             timestep=sample["timesteps"][:, j],
             encoder_hidden_states=embeds,
-            pooled_projections=pooled_embeds,
             return_dict=False,
         )[0]
     
@@ -216,13 +214,11 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
     return prev_sample, log_prob, prev_sample_mean, std_dev_t
 
 def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerator, global_step, reward_fn, executor, autocast, num_train_timesteps, ema, transformer_trainable_parameters):
+    if pipeline.device.startswith('cuda'):
+        torch.cuda.empty_cache() 
     if config.train.ema:
         ema.copy_ema_to(transformer_trainable_parameters, store_temp=True)
-    neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device)
-
-    sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.test_batch_size, 1, 1)
-    sample_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.sample.test_batch_size, 1)
-
+    
     # test_dataloader = itertools.islice(test_dataloader, 2)
     all_rewards = defaultdict(list)
     for test_batch in tqdm(
@@ -232,42 +228,37 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             position=0,
         ):
         prompts, prompt_metadata = test_batch
-        prompt_embeds, pooled_prompt_embeds = compute_text_embeddings(
+        prompt_embeds = compute_text_embeddings(
             prompts, 
             text_encoders, 
             tokenizers, 
-            max_sequence_length=128, 
+            max_sequence_length=512, 
             device=accelerator.device
         )
-        # The last batch may not be full batch_size
-        if len(prompt_embeds)<len(sample_neg_prompt_embeds):
-            sample_neg_prompt_embeds = sample_neg_prompt_embeds[:len(prompt_embeds)]
-            sample_neg_pooled_prompt_embeds = sample_neg_pooled_prompt_embeds[:len(prompt_embeds)]
         with autocast():
             with torch.no_grad():
-                images, _, _ = pipeline_with_logprob(
+                videos = pipeline_with_logprob(
                     pipeline,
                     prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_prompt_embeds=sample_neg_prompt_embeds,
-                    negative_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds,
                     num_inference_steps=config.sample.eval_num_steps,
                     guidance_scale=config.sample.guidance_scale,
-                    output_type="pt",
-                    height=config.resolution,
-                    width=config.resolution, 
-                    noise_level=0,
+                    height=config.height,
+                    width=config.width, 
+                    noise_level=0, # 无随机性
+                    return_prob=False, # 不返回logprob
                 )
-        rewards = executor.submit(reward_fn, images, prompts, prompt_metadata, only_strict=False)
+        rewards = executor.submit(reward_fn, videos, prompts, prompt_metadata, only_strict=False)
         # yield to to make sure reward computation starts
         time.sleep(0)
-        rewards, reward_metadata = rewards.result()
+        rewards, _ = rewards.result()
+        del _
 
         for key, value in rewards.items():
             rewards_gather = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
             all_rewards[key].append(rewards_gather)
+        del rewards
     
-    last_batch_images_gather = accelerator.gather(torch.as_tensor(images, device=accelerator.device)).cpu().numpy()
+    last_batch_videos_gather = accelerator.gather(torch.as_tensor(videos, device=accelerator.device)).cpu().numpy()
     last_batch_prompt_ids = tokenizers[0](
         prompts,
         padding="max_length",
@@ -286,25 +277,21 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
     all_rewards = {key: np.concatenate(value) for key, value in all_rewards.items()}
     if accelerator.is_main_process:
         with tempfile.TemporaryDirectory() as tmpdir:
-            num_samples = min(15, len(last_batch_images_gather))
-            # sample_indices = random.sample(range(len(images)), num_samples)
+            num_samples = min(4, len(last_batch_videos_gather))
+            # sample_indices = random.sample(range(len(videos)), num_samples)
             sample_indices = range(num_samples)
             for idx, index in enumerate(sample_indices):
-                image = last_batch_images_gather[index]
-                pil = Image.fromarray(
-                    (image.transpose(1, 2, 0) * 255).astype(np.uint8)
-                )
-                pil = pil.resize((config.resolution, config.resolution))
-                pil.save(os.path.join(tmpdir, f"{idx}.jpg"))
+                video = last_batch_videos_gather[index]
+                export_to_video(video, os.path.join(tmpdir, f"{idx}.mp4"), 15)
             sampled_prompts = [last_batch_prompts_gather[index] for index in sample_indices]
             sampled_rewards = [{k: last_batch_rewards_gather[k][index] for k in last_batch_rewards_gather} for index in sample_indices]
             for key, value in all_rewards.items():
                 print(key, value.shape)
-            wandb.log(
+            swanlab.log(
                 {
-                    "eval_images": [
-                        wandb.Image(
-                            os.path.join(tmpdir, f"{idx}.jpg"),
+                    "eval_videos": [
+                        swanlab.video(
+                            os.path.join(tmpdir, f"{idx}.mp4"),
                             caption=f"{prompt:.1000} | " + " | ".join(f"{k}: {v:.2f}" for k, v in reward.items() if v != -10),
                         )
                         for idx, (prompt, reward) in enumerate(zip(sampled_prompts, sampled_rewards))
@@ -352,7 +339,7 @@ def main(_):
     )
 
     accelerator = Accelerator(
-        # log_with="wandb",
+        # log_with="swanlab",
         mixed_precision=config.mixed_precision,
         project_config=accelerator_config,
         # we always accumulate gradients across timesteps; we want config.train.gradient_accumulation_steps to be the
@@ -361,13 +348,16 @@ def main(_):
         gradient_accumulation_steps=config.train.gradient_accumulation_steps * num_train_timesteps,
     )
     if accelerator.is_main_process:
-        wandb.init(
+        swanlab.init(
+            job_type="Finetune-Wan2_1",
             project="flow_grpo",
+            dir = config.save_dir,
+            config=config.to_dict(),
         )
         # accelerator.init_trackers(
         #     project_name="flow-grpo",
         #     config=config.to_dict(),
-        #     init_kwargs={"wandb": {"name": config.run_name}},
+        #     init_kwargs={"swanlab": {"name": config.run_name}},
         # )
     logger.info(f"\n{config}")
 
@@ -375,18 +365,17 @@ def main(_):
     set_seed(config.seed, device_specific=True)
 
     # load scheduler, tokenizer and models.
-    pipeline = StableDiffusion3Pipeline.from_pretrained(
-        config.pretrained.model
+    pipeline = WanPipeline.from_pretrained(
+        config.pretrained.model,
     )
+    pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(pipeline.scheduler.config, step_offset=1)
     # freeze parameters of models to save more memory
     pipeline.vae.requires_grad_(False)
     pipeline.text_encoder.requires_grad_(False)
-    pipeline.text_encoder_2.requires_grad_(False)
-    pipeline.text_encoder_3.requires_grad_(False)
     pipeline.transformer.requires_grad_(not config.use_lora)
 
-    text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]
-    tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2, pipeline.tokenizer_3]
+    text_encoders = [pipeline.text_encoder]
+    tokenizers = [pipeline.tokenizer]
 
     # disable safety checker
     pipeline.safety_checker = None
@@ -408,28 +397,21 @@ def main(_):
         inference_dtype = torch.bfloat16
 
     # Move vae and text_encoder to device and cast to inference_dtype
-    pipeline.vae.to(accelerator.device, dtype=torch.float32)
+    pipeline.vae.to(accelerator.device, dtype=torch.float32) # keep conversion quality
     pipeline.text_encoder.to(accelerator.device, dtype=inference_dtype)
-    pipeline.text_encoder_2.to(accelerator.device, dtype=inference_dtype)
-    pipeline.text_encoder_3.to(accelerator.device, dtype=inference_dtype)
-    
-    pipeline.transformer.to(accelerator.device)
+    pipeline.transformer.to(accelerator.device, dtype=inference_dtype)
 
     if config.use_lora:
         # Set correct lora layers
         target_modules = [
-            "attn.add_k_proj",
-            "attn.add_q_proj",
-            "attn.add_v_proj",
-            "attn.to_add_out",
-            "attn.to_k",
-            "attn.to_out.0",
-            "attn.to_q",
-            "attn.to_v",
+            # "attn2.to_k",
+            "attn2.to_out.0",
+            "attn2.to_q",
+            "attn2.to_v",
         ]
         transformer_lora_config = LoraConfig(
-            r=32,
-            lora_alpha=64,
+            r=16,
+            lora_alpha=32,
             init_lora_weights="gaussian",
             target_modules=target_modules,
         )
@@ -441,7 +423,9 @@ def main(_):
             pipeline.transformer = get_peft_model(pipeline.transformer, transformer_lora_config)
     
     transformer = pipeline.transformer
+    transformer.enable_gradient_checkpointing()
     transformer_trainable_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    logger.info(f"Trainable parameters: {transformer.get_nb_trainable_parameters()}")
     # This ema setting affects the previous 20 × 8 = 160 steps on average.
     ema = EMAModuleWrapper(transformer_trainable_parameters, decay=0.9, update_step_interval=8, device=accelerator.device)
     
@@ -476,7 +460,8 @@ def main(_):
     eval_reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
 
     if config.prompt_fn == "general_ocr":
-        train_dataset = TextPromptDataset(config.dataset, 'train')
+        # train_dataset = TextPromptDataset(config.dataset, 'train')
+        train_dataset = TextPromptDataset(config.dataset, 'train100')
         test_dataset = TextPromptDataset(config.dataset, 'test')
 
         # Create an infinite-loop DataLoader
@@ -537,13 +522,9 @@ def main(_):
     else:
         raise NotImplementedError("Only general_ocr is supported with dataset")
 
+    neg_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers, max_sequence_length=512, device=accelerator.device)
 
-    neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device)
-
-    sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.train_batch_size, 1, 1)
-    train_neg_prompt_embeds = neg_prompt_embed.repeat(config.train.batch_size, 1, 1)
-    sample_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.sample.train_batch_size, 1)
-    train_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.train.batch_size, 1)
+    train_neg_prompt_embeds = neg_prompt_embed.repeat(config.train.batch_size, 1, 1, 1)
 
     if config.sample.num_image_per_prompt == 1:
         config.per_prompt_stat_tracking = False
@@ -619,17 +600,17 @@ def main(_):
             train_sampler.set_epoch(epoch * config.sample.num_batches_per_epoch + i)
             prompts, prompt_metadata = next(train_iter)
 
-            prompt_embeds, pooled_prompt_embeds = compute_text_embeddings(
+            prompt_embeds = compute_text_embeddings(
                 prompts, 
                 text_encoders, 
                 tokenizers, 
-                max_sequence_length=128, 
+                max_sequence_length=512, 
                 device=accelerator.device
             )
             prompt_ids = tokenizers[0](
                 prompts,
                 padding="max_length",
-                max_length=256,
+                max_length=512,
                 truncation=True,
                 return_tensors="pt",
             ).input_ids.to(accelerator.device)
@@ -641,17 +622,14 @@ def main(_):
                 generator = None
             with autocast():
                 with torch.no_grad():
-                    images, latents, log_probs = pipeline_with_logprob(
+                    videos, latents, log_probs = pipeline_with_logprob(
                         pipeline,
                         prompt_embeds=prompt_embeds,
-                        pooled_prompt_embeds=pooled_prompt_embeds,
-                        negative_prompt_embeds=sample_neg_prompt_embeds,
-                        negative_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds,
+                        # negative_prompt_embeds=sample_neg_prompt_embeds,
                         num_inference_steps=config.sample.num_steps,
                         guidance_scale=config.sample.guidance_scale,
-                        output_type="pt",
-                        height=config.resolution,
-                        width=config.resolution, 
+                        height=config.height,
+                        width=config.width, 
                         noise_level=config.sample.noise_level,
                         generator=generator
                 )
@@ -666,7 +644,7 @@ def main(_):
             )  # (batch_size, num_steps)
 
             # compute rewards asynchronously
-            rewards = executor.submit(reward_fn, images, prompts, prompt_metadata, only_strict=True)
+            rewards = executor.submit(reward_fn, videos, prompts, prompt_metadata, only_strict=True)
             # yield to to make sure reward computation starts
             time.sleep(0)
 
@@ -674,7 +652,6 @@ def main(_):
                 {
                     "prompt_ids": prompt_ids,
                     "prompt_embeds": prompt_embeds,
-                    "pooled_prompt_embeds": pooled_prompt_embeds,
                     "timesteps": timesteps,
                     "latents": latents[
                         :, :-1
@@ -694,8 +671,7 @@ def main(_):
             disable=not accelerator.is_local_main_process,
             position=0,
         ):
-            rewards, reward_metadata = sample["rewards"].result()
-            # accelerator.print(reward_metadata)
+            rewards = sample["rewards"].result()[0]
             sample["rewards"] = {
                 key: torch.as_tensor(value, device=accelerator.device).float()
                 for key, value in rewards.items()
@@ -713,27 +689,23 @@ def main(_):
         }
 
         if epoch % 10 == 0 and accelerator.is_main_process:
-            # this is a hack to force wandb to log the images as JPEGs instead of PNGs
+            # this is a hack to force swanlab to log the videos as JPEGs instead of PNGs
             with tempfile.TemporaryDirectory() as tmpdir:
-                num_samples = min(15, len(images))
-                sample_indices = random.sample(range(len(images)), num_samples)
+                num_samples = min(4, len(videos))
+                sample_indices = random.sample(range(len(videos)), num_samples)
 
                 for idx, i in enumerate(sample_indices):
-                    image = images[i]
-                    pil = Image.fromarray(
-                        (image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-                    )
-                    pil = pil.resize((config.resolution, config.resolution))
-                    pil.save(os.path.join(tmpdir, f"{idx}.jpg"))  # 使用新的索引
+                    video = videos[i]
+                    export_to_video(video, os.path.join(tmpdir, f"{idx}.mp4"), fps=15)
 
                 sampled_prompts = [prompts[i] for i in sample_indices]
                 sampled_rewards = [rewards['avg'][i] for i in sample_indices]
 
-                wandb.log(
+                swanlab.log(
                     {
-                        "images": [
-                            wandb.Image(
-                                os.path.join(tmpdir, f"{idx}.jpg"),
+                        "videos": [
+                            swanlab.video(
+                                os.path.join(tmpdir, f"{idx}.mp4"),
                                 caption=f"{prompt:.100} | avg: {avg_reward:.2f}",
                             )
                             for idx, (prompt, avg_reward) in enumerate(zip(sampled_prompts, sampled_rewards))
@@ -747,9 +719,9 @@ def main(_):
         # gather rewards across processes
         gathered_rewards = {key: accelerator.gather(value) for key, value in samples["rewards"].items()}
         gathered_rewards = {key: value.cpu().numpy() for key, value in gathered_rewards.items()}
-        # log rewards and images
+        # log rewards and videos
         if accelerator.is_main_process:
-            wandb.log(
+            swanlab.log(
                 {
                     "epoch": epoch,
                     **{f"reward_{key}": value.mean() for key, value in gathered_rewards.items() if '_strict_accuracy' not in key and '_accuracy' not in key},
@@ -774,7 +746,7 @@ def main(_):
             zero_std_ratio, reward_std_mean = calculate_zero_std_ratio(prompts, gathered_rewards) # 统计毫无奖励变化的比例
 
             if accelerator.is_main_process:
-                wandb.log(
+                swanlab.log(
                     {
                         "group_size": group_size,
                         "trained_prompt_num": trained_prompt_num,
@@ -813,7 +785,7 @@ def main(_):
                 random_indices = torch.randperm(len(false_indices))[:num_to_change]
                 mask[false_indices[random_indices]] = True
         if accelerator.is_main_process:
-            wandb.log(
+            swanlab.log(
                 {
                     "actual_batch_size": mask.sum().item()//config.sample.num_batches_per_epoch,
                 },
@@ -860,12 +832,8 @@ def main(_):
                     embeds = torch.cat(
                         [train_neg_prompt_embeds[:len(sample["prompt_embeds"])], sample["prompt_embeds"]]
                     )
-                    pooled_embeds = torch.cat(
-                        [train_neg_pooled_prompt_embeds[:len(sample["pooled_prompt_embeds"])], sample["pooled_prompt_embeds"]]
-                    )
                 else:
                     embeds = sample["prompt_embeds"]
-                    pooled_embeds = sample["pooled_prompt_embeds"]
 
                 train_timesteps = [step_index  for step_index in range(num_train_timesteps)]
                 for j in tqdm(
@@ -877,11 +845,11 @@ def main(_):
                 ):
                     with accelerator.accumulate(transformer):
                         with autocast():
-                            prev_sample, log_prob, prev_sample_mean, std_dev_t = compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config)
+                            prev_sample, log_prob, prev_sample_mean, std_dev_t = compute_log_prob(transformer, pipeline, sample, j, embeds, config)
                             if config.train.beta > 0:
                                 with torch.no_grad():
                                     with transformer.module.disable_adapter():
-                                        _, _, prev_sample_mean_ref, _ = compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config)
+                                        _, _, prev_sample_mean_ref, _ = compute_log_prob(transformer, pipeline, sample, j, embeds, config)
 
                         # grpo logic
                         advantages = torch.clamp(
@@ -954,7 +922,7 @@ def main(_):
                         info = accelerator.reduce(info, reduction="mean")
                         info.update({"epoch": epoch, "inner_epoch": inner_epoch})
                         if accelerator.is_main_process:
-                            wandb.log(info, step=global_step)
+                            swanlab.log(info, step=global_step)
                         global_step += 1
                         info = defaultdict(list)
                 if config.train.ema:
@@ -966,4 +934,3 @@ def main(_):
         
 if __name__ == "__main__":
     app.run(main)
-
