@@ -183,6 +183,48 @@ def clipscore_sd3():
     config.per_prompt_stat_tracking = True
     return config
 
+def pickscore_sd3_s1():
+    gpu_number=32
+    config = compressibility()
+    config.dataset = os.path.join(os.getcwd(), "dataset/pickscore")
+
+    # sd3.5 medium
+    config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
+    config.sample.num_steps = 10
+    config.sample.train_num_steps = 1
+    config.sample.eval_num_steps = 40
+    config.sample.guidance_scale = 4.5
+
+    config.resolution = 512
+    # 这里固定为1
+    config.sample.train_batch_size = 1
+    config.sample.num_image_per_prompt = 24
+    config.sample.mini_num_image_per_prompt = 6
+    config.sample.num_batches_per_epoch = 4
+    config.sample.test_batch_size = 16 # This bs is a special design, the test set has a total of 2048, to make gpu_num*bs*n as close as possible to 2048, because when the number of samples cannot be divided evenly by the number of cards, multi-card will fill the last batch to ensure each card has the same number of samples, affecting gradient synchronization.
+
+    config.train.batch_size = config.sample.mini_num_image_per_prompt
+    config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch//2
+    config.train.num_inner_epochs = 1
+    config.train.timestep_fraction = 0.99
+    config.train.clip_range = 1e-4
+    config.train.beta = 0
+    config.sample.global_std = True
+    config.sample.noise_level = 5
+    config.train.ema = True
+    config.save_freq = 30 # epoch
+    config.eval_freq = 30
+    config.save_dir = 'logs/pickscore/sd3.5-M-s1'
+    config.reward_fn = {
+        "pickscore": 1.0,
+    }
+    
+    config.prompt_fn = "general_ocr"
+
+    config.per_prompt_stat_tracking = True
+    return config
+
+
 def general_ocr_sd3_4gpu():
     gpu_number = 4
     config = compressibility()

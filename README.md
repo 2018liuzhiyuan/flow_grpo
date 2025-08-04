@@ -9,19 +9,35 @@
 
 ## Changelog
 
+**2025-07-31**
+
+- Adding Flow-GRPO-S1.
+
 **2025-07-28**
 
-- Added support for **FLUX**.
-- Added support for CLIPScore as reward model.
-- Introduced `config.sample.same_latent` to control whether the same noise is reused for identical prompts, addressing [Issue #7](https://github.com/yifan123/flow_grpo/issues/7).
+- Adding support for **FLUX**.
+- Adding support for CLIPScore as reward model.
+- Introducing `config.sample.same_latent` to control whether the same noise is reused for identical prompts, addressing [Issue #7](https://github.com/yifan123/flow_grpo/issues/7).
 
 **2025-05-15** 
 
 - 🔥We showcase image examples from three tasks and their training evolution at https://gongyeliu.github.io/Flow-GRPO. Check them out!
 - 🔥We now provide an online demo for all three tasks at https://huggingface.co/spaces/jieliu/SD3.5-M-Flow-GRPO. You're welcome to try it out!
 
+## Flow-GRPO-S1
+We propose Flow-GRPO-S1, an accelerated variant of Flow-GRPO that requires training on **only a single denoising step** per trajectory. For each prompt, we first generate a deterministic trajectory using ODE sampling. At a randomly chosen intermediate step, we inject noise and switch to SDE sampling to generate a group. The rest of the process continues with ODE sampling. This confines stochasticity to a single step, allowing training to focus solely on that step. This one-step training idea was primarily proposed by [Ziyang Yuan](https://scholar.google.com/citations?user=fWxWEzsAAAAJ&hl=en) during our discussions in early June. 
 
+Flow-GRPO-S1 achieves significant efficiency gains:
 
+- Each trajectory is trained only once, reducing the training cost by approximately a factor of num_steps.
+
+- Sampling before branching requires only a single prompt without group expansion, further speeding up data collection.
+
+Experiments on PickScore show that Flow-GRPO-S1 matches the reward performance of Flow-GRPO while offering 5–10× faster training. 
+
+We find that injecting noise at a randomly selected step among the first two steps yields the best results. Introducing large noise in low-noise regions tends to significantly degrade image quality, whereas injecting it in higher-noise regions promotes diversity with minimal impact on the final visual quality during data collection.
+
+Please use scripts in `scripts/multi_node/sd3_s1` to run these experiments.
 ## 🤗 Model
 | Task    | Model |
 | -------- | -------- |
