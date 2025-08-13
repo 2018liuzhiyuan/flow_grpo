@@ -21,7 +21,7 @@ from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob_s1 import pipeline_with
 from flow_grpo.diffusers_patch.sd3_sde_with_logprob_s1 import sde_step_with_logprob
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt
 import torch
-import wandb
+import swanlab
 from functools import partial
 import tqdm
 import tempfile
@@ -292,10 +292,10 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             sampled_rewards = [{k: last_batch_rewards_gather[k][index] for k in last_batch_rewards_gather} for index in sample_indices]
             for key, value in all_rewards.items():
                 print(key, value.shape)
-            wandb.log(
+            swanlab.log(
                 {
                     "eval_images": [
-                        wandb.Image(
+                        swanlab.Image(
                             os.path.join(tmpdir, f"{idx}.jpg"),
                             caption=f"{prompt:.1000} | " + " | ".join(f"{k}: {v:.2f}" for k, v in reward.items() if v != -10),
                         )
@@ -344,7 +344,7 @@ def main(_):
     )
 
     accelerator = Accelerator(
-        # log_with="wandb",
+        # log_with="swanlab",
         mixed_precision=config.mixed_precision,
         project_config=accelerator_config,
         # we always accumulate gradients across timesteps; we want config.train.gradient_accumulation_steps to be the
@@ -353,13 +353,14 @@ def main(_):
         gradient_accumulation_steps=config.train.gradient_accumulation_steps * config.sample.train_num_steps,
     )
     if accelerator.is_main_process:
-        wandb.init(
-            project="flow_grpo",
+        swanlab.init(
+            project="flow_grpo_sd35M",
+            config=config.to_dict(),
         )
         # accelerator.init_trackers(
         #     project_name="flow-grpo",
         #     config=config.to_dict(),
-        #     init_kwargs={"wandb": {"name": config.run_name}},
+        #     init_kwargs={"swanlab": {"name": config.run_name}},
         # )
     logger.info(f"\n{config}")
 
@@ -701,7 +702,7 @@ def main(_):
         }
 
         if epoch % 10 == 0 and accelerator.is_main_process:
-            # this is a hack to force wandb to log the images as JPEGs instead of PNGs
+            # this is a hack to force swanlab to log the images as JPEGs instead of PNGs
             with tempfile.TemporaryDirectory() as tmpdir:
                 num_samples = min(15, len(images))
                 sample_indices = random.sample(range(len(images)), num_samples)
@@ -717,10 +718,10 @@ def main(_):
                 sampled_prompts = [prompts[i] for i in sample_indices]
                 sampled_rewards = [rewards['avg'][i] for i in sample_indices]
 
-                wandb.log(
+                swanlab.log(
                     {
                         "images": [
-                            wandb.Image(
+                            swanlab.Image(
                                 os.path.join(tmpdir, f"{idx}.jpg"),
                                 caption=f"{prompt:.100} | avg: {avg_reward:.2f}",
                             )
@@ -737,7 +738,7 @@ def main(_):
         gathered_rewards = {key: value.cpu().numpy() for key, value in gathered_rewards.items()}
         # log rewards and images
         if accelerator.is_main_process:
-            wandb.log(
+            swanlab.log(
                 {
                     "epoch": epoch,
                     **{f"reward_{key}": value.mean() for key, value in gathered_rewards.items() if '_strict_accuracy' not in key and '_accuracy' not in key},
@@ -762,7 +763,7 @@ def main(_):
             zero_std_ratio, reward_std_mean = calculate_zero_std_ratio(prompts, gathered_rewards)
 
             if accelerator.is_main_process:
-                wandb.log(
+                swanlab.log(
                     {
                         "group_size": group_size,
                         "trained_prompt_num": trained_prompt_num,
@@ -912,7 +913,7 @@ def main(_):
                         info = accelerator.reduce(info, reduction="mean")
                         info.update({"epoch": epoch, "inner_epoch": inner_epoch})
                         if accelerator.is_main_process:
-                            wandb.log(info, step=global_step)
+                            swanlab.log(info, step=global_step)
                         global_step += 1
                         info = defaultdict(list)
                 if config.train.ema:

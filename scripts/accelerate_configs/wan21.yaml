@@ -1,0 +1,27 @@
+# 单机 4 卡 FSDP (ZeRO-3) 训练推荐配置
+# 适用于 1.3B 规模模型，例如 Wan2.1-1.3B
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+downcast_bf16: 'no' # 开启bf16混合精度训练
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_backward_prefetch_policy: BACKWARD_PRE
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_forward_prefetch: false             # 保持 false 以节省显存，如果显存充裕可尝试设为 true 观察是否提速
+  fsdp_offload_params: false             # [!IMPORTANT] 性能关键点。设为 false 速度快但耗显存。若OOM，请改为 true
+  fsdp_sharding_strategy: FULL_SHARD     # ZeRO-3 策略，最大化显存优化
+  fsdp_state_dict_type: SHARDED_STATE_DICT # 推荐，便于大规模模型断点续训和保存
+  fsdp_sync_module_states: true
+  fsdp_transformer_layer_cls_to_wrap: WanTransformerBlock
+  fsdp_use_orig_params: true
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16   # 使用 bf16 进行混合精度训练，适用于 Ampere (A100) 或更新的 GPU
+num_machines: 1
+num_processes: 4  # 您的 GPU 数量
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

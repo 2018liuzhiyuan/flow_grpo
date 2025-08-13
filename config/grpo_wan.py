@@ -113,30 +113,31 @@ def pickscore_wan():
 
     # wan
     config.pretrained.model = "/home/liuzhiy/Code/flow_grpo/models/Wan21_1_3B"
-    config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
-    config.sample.guidance_scale = 5
-    config.mix_precision = "fp16"
+    config.sample.num_steps = 16
+    config.sample.eval_num_steps = 50
+    config.sample.guidance_scale = 6
+    config.mix_precision = "fp16" #"bf16" 
+    config.train.learning_rate = 1e-3 #3e-4
 
     config.resolution = 512
     config.sample.train_batch_size = 1
     
-    config.sample.num_image_per_prompt = 1
-    config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
+    config.sample.num_image_per_prompt = 4 # ! video count per prompt
+    config.sample.num_batches_per_epoch = int(24/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
-    config.sample.test_batch_size = 8 # This bs is a special design, the test set has a total of 2048, to make gpu_num*bs*n as close as possible to 2048, because when the number of samples cannot be divided evenly by the number of cards, multi-card will fill the last batch to ensure each card has the same number of samples, affecting gradient synchronization.
+    config.sample.test_batch_size = 2 # This bs is a special design, the test set has a total of 2048, to make gpu_num*bs*n as close as possible to 2048, because when the number of samples cannot be divided evenly by the number of cards, multi-card will fill the last batch to ensure each card has the same number of samples, affecting gradient synchronization.
 
     config.train.batch_size = 1
     config.train.use_8bit_adam = True
-    config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch//2
+    config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch // 2
     config.train.num_inner_epochs = 1
-    config.train.timestep_fraction = 0.5
+    config.train.timestep_fraction = 0.9
     config.train.beta = 0.01
     config.sample.global_std = True
-    config.sample.same_latent = False
-    config.train.ema = False 
-    config.save_freq = 1 # epoch
-    config.eval_freq = 1
+    config.sample.same_latent = True
+    config.train.ema = True  
+    config.save_freq = 2 # epoch
+    config.eval_freq = 2
     config.save_dir = 'logs/pickscore/wan'
     config.reward_fn = {
         "pickscore": 1.0,

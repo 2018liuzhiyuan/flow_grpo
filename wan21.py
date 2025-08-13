@@ -4,16 +4,16 @@ from diffusers.utils import export_to_video
 
 # Available models: Wan-AI/Wan2.1-T2V-14B-Diffusers, Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 # model_id = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
-model_id = "/home/liuzhiy/Code/flow_grpo/models/Wan21_1_3B"
+# model_id = "/home/liuzhiy/Code/flow_grpo/models/Wan21_1_3B"
+model_id = "/home/liuzhiy/Code/flow_grpo/models/WAN2_2-5B"
 vae = AutoencoderKLWan.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32)
 pipe = WanPipeline.from_pretrained(model_id, vae=vae, torch_dtype=torch.bfloat16)
 pipe.to("cuda")
 
 # 输出transformer 的模块及参数量
-modules = pipe.transformer.named_parameters()
-for name, module in modules:
-    print(name, module.numel())
-exit()
+# modules = pipe.transformer.named_parameters()
+# for name, module in modules:
+#     print(name, module.numel())
 
 
 prompt = "A cat walks on the grass, realistic"

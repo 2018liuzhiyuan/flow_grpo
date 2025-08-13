@@ -35,7 +35,7 @@ def pipeline_with_logprob(
 ):
     if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
         callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
-
+     
     # 1. Check inputs. Raise error if not correct
     self.check_inputs(
         prompt,
@@ -118,7 +118,7 @@ def pipeline_with_logprob(
             self._current_timestep = t
             latent_model_input = latents.to(transformer_dtype)
             timestep = t.expand(latents.shape[0])
-
+            
             noise_pred = self.transformer(
                 hidden_states=latent_model_input,
                 timestep=timestep,
@@ -126,6 +126,7 @@ def pipeline_with_logprob(
                 attention_kwargs=attention_kwargs,
                 return_dict=False,
             )[0]
+            assert not torch.isnan(noise_pred).any(), f"noise_pred contains NaN: {noise_pred}"
 
             if self.do_classifier_free_guidance:
                 # print(latent_model_input.shape, timestep.shape, negative_prompt_embeds.shape)
@@ -136,8 +137,11 @@ def pipeline_with_logprob(
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
                 )[0]
+                assert not torch.isnan(noise_uncond).any(), f"noise_uncond contains NaN: {noise_uncond}"
                 noise_pred = noise_uncond + guidance_scale * (noise_pred - noise_uncond)
-
+    
+            # 校验 latents 是否存在 Nan
+            assert not torch.isnan(latents).any(), f"latents 存在 NaN 值. before sde at step{i} time{t}"
             # compute the previous noisy sample x_t -> x_t-1
             # 替换原有scheduler.step调用
             latents, log_prob, prev_latents_mean, std_dev_t = sde_step_with_logprob(
@@ -147,6 +151,9 @@ def pipeline_with_logprob(
                 latents.float(),
                 noise_level=noise_level,
             )
+            
+            assert not torch.isnan(latents).any(), f"latents 存在 NaN 值. after sde at step{i} time{t}"
+            
             if return_prob:
                 all_latents.append(latents)
                 all_log_probs.append(log_prob)
@@ -183,6 +190,7 @@ def pipeline_with_logprob(
         )
         latents = latents / latents_std + latents_mean
         video = self.vae.decode(latents, return_dict=False)[0]
+        # output Shape = (B, num_frame, H, W, C)
         video = self.video_processor.postprocess_video(video, output_type=output_type)
     else:
         video = latents
@@ -191,6 +199,8 @@ def pipeline_with_logprob(
     self.maybe_free_model_hooks()
 
     if return_prob:
+        # print(video.shape, len(all_latents), all_latents[0].shape, all_log_probs[0].shape)
+        # (1, 81, 480, 832, 3) 51           torch.Size([1, 16, 21, 60, 104]) torch.Size([1])
         return video, all_latents, all_log_probs
     else:
         return video

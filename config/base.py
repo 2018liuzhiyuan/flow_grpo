@@ -27,6 +27,9 @@ def get_config():
     config.resolution = 768
     config.height = 480 
     config.width = 832
+    # config.height = 512 
+    # config.width = 512
+    config.num_frames = 81
 
     ###### Pretrained Model ######
     config.pretrained = pretrained = ml_collections.ConfigDict()

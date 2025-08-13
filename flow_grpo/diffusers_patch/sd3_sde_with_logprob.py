@@ -37,6 +37,12 @@ def sde_step_with_logprob(
     if prev_sample is not None:
         prev_sample = prev_sample.float()  # 若存在前一步样本，也转为 FP32
 
+    assert not torch.isnan(model_output).any(), f"model_output contains NaN: {model_output}"
+    assert not torch.isnan(sample).any(), f"sample contains NaN: {sample}"
+    if prev_sample is not None:
+        assert not torch.isnan(prev_sample).any(), f"prev_sample contains NaN: {prev_sample}"
+
+
     # 根据时间步获取调度器中的索引（用于获取预计算的 sigma 值）
     step_index = [self.index_for_timestep(t) for t in timestep]  # 当前时间步对应的调度器索引列表
     prev_step_index = [step+1 for step in step_index]            # 前一步时间步对应的调度器索引列表
@@ -52,9 +58,15 @@ def sde_step_with_logprob(
     # torch.where 处理 sigma=1 的情况（避免除零），使用 sigma_max 替代
     std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * noise_level
 
+    assert not torch.isnan(sigma).any(), f"sigma contains NaN: {sigma}"
+    assert not torch.isnan(sigma_prev).any(), f"sigma_prev contains NaN: {sigma_prev}"
+    assert not torch.isnan(std_dev_t).any(), f"std_dev_t contains NaN: {std_dev_t}"
+
     # 根据自定义 SDE 公式计算前一步样本的均值（核心扩散步骤） 
     prev_sample_mean = sample * (1 + std_dev_t**2 / (2 * sigma) * dt) + model_output * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
 
+    assert not torch.isnan(prev_sample_mean).any(), f"prev_sample_mean contains NaN: {prev_sample_mean}"
+    
     # 若未显式提供前一步样本，则通过加噪声生成
     if prev_sample is None:
         # 生成与模型输出同形状的随机噪声（用于扩散过程的随机性）
@@ -66,6 +78,8 @@ def sde_step_with_logprob(
         )
         # 前一步样本 = 均值 + 标准差 * 时间步长平方根 * 噪声
         prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-1 * dt) * variance_noise
+    
+    assert not torch.isnan(prev_sample).any(), f"prev_sample_mean contains NaN: {prev_sample_mean}"
 
     # 计算当前步骤的对数概率（基于高斯分布假设）
     log_prob = (
